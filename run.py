@@ -1,9 +1,11 @@
 import itertools
+import math
 
 import click
 import regex
 import requests
 import rich
+from rich.progress import Progress
 
 from decorators import request_cli
 from strategies import all_strategies
@@ -50,7 +52,7 @@ def iter_explanation_lines(response: requests.Response):
     for header, value in response.request.headers.items():
         yield f"\t{header!r}: {value!r}"
 
-    yield f"Elapsed: {response.elapsed.total_seconds()}s"
+    yield f"\tTime elapsed: {response.elapsed.total_seconds():.02f}s"
 
 
 @click.command()
@@ -65,6 +67,8 @@ def content_access_strategies(
     no_verify,
     disallow_redirects,
 ):
+
+    console = rich.get_console()
 
     if data and method not in ("POST", "PUT", "PATCH"):
         method = "POST"
@@ -107,49 +111,75 @@ def content_access_strategies(
 
         return session, executor
 
-    for count, strategies in enumerate(
-        itertools.chain(combinations_iterator, ((_,) for _ in uncombinables)), 1
-    ):
+    with Progress(console=console) as progress:
 
-        rich.print(f"On combination {count}:")
+        total_strategies = sum(
+            math.comb(len(combinables), n) for n in range(len(combinables) + 1)
+        ) + len(uncombinables)
 
-        priority_sorted = sorted(strategies, key=lambda _: _.priority)
-
-        suffix = f" using {', '.join(repr(_.__name__) for _ in strategies) or 'no'} strategy(s)."
-        rich.print(f"\t[yellow]Running[/]" + suffix)
-
-        used_strategies = set()
-
-        session, executor = session_manager()
-
-        for strategy in priority_sorted:
-            rich.print(f"\t\tExecuting {strategy.__name__!r}, goal: {strategy.goal}")
-            try:
-                strategy(session).execute()
-                used_strategies.add(strategy)
-            except StrategyException as strategy_exception:
-                rich.print(
-                    f"\t\t{strategy.__name__} failed due to {strategy_exception!r}"
-                )
-
-        response = executor()
-
-        after_suffix = f" after using {', '.join(repr(_.__name__) for _ in used_strategies) or 'no'} strategy(s)."
-
-        if response.ok:
-            rich.print(f"[green]Obtained[/] {response!r}" + after_suffix)
-
-            for line in iter_explanation_lines(response):
-                rich.print(line)
-
-            return
-
-        rich.print(
-            f"\t[red]Failed[/] to obtain valid response ({response!r})" + after_suffix,
+        strategiser_task = progress.add_task(
+            "Running strategies", total=total_strategies
         )
-        del session
 
-    rich.print(
+        for count, strategies in enumerate(
+            itertools.chain(combinations_iterator, ((_,) for _ in uncombinables)), 1
+        ):
+
+            console.print(f"On combination {count}:")
+
+            priority_sorted = sorted(strategies, key=lambda _: _.priority)
+
+            suffix = f" using {', '.join(repr(_.__name__) for _ in strategies) or 'no'} strategy(s)."
+            console.print(f"\t[yellow]Running[/]" + suffix)
+
+            used_strategies = set()
+
+            session, executor = session_manager()
+
+            for strategy in priority_sorted:
+                console.print(
+                    f"\t\tExecuting {strategy.__name__!r}, goal: {strategy.goal}"
+                )
+                try:
+                    strategy(session).execute()
+                    used_strategies.add(strategy)
+                except StrategyException as strategy_exception:
+                    console.print(
+                        f"\t\t{strategy.__name__} failed due to {strategy_exception!r}"
+                    )
+
+            response = executor()
+
+            after_suffix = f" after using {', '.join(repr(_.__name__) for _ in used_strategies) or 'no'} strategy(s)."
+
+            if response.ok:
+                console.print(f"[green]Obtained[/] {response!r}" + after_suffix)
+
+                for line in iter_explanation_lines(response):
+                    console.print(line)
+
+                progress.update(
+                    strategiser_task,
+                    completed=total_strategies,
+                    description="Strategies complete",
+                )
+                return
+
+            console.print(
+                f"\t[red]Failed[/] to obtain valid response ({response!r})"
+                + after_suffix,
+            )
+            del session
+
+            progress.update(strategiser_task, advance=1)
+
+        progress.update(
+            strategiser_task,
+            completed=total_strategies,
+            description="All strategies failed",
+        )
+
+    console.print(
         "[red]Nothing worked :/.[/]",
     )
 
